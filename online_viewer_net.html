@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gesture-Controlled Interactive 3D Hologram Interface </title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #000;
+        font-family: "Segoe UI", sans-serif;
+      }
+      #status {
+        position: absolute;
+        top: 22px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: #00f2ff;
+        font-size: 24px;
+        font-weight: bold;
+        letter-spacing: 3px;
+        text-shadow: 0 0 15px #00f2ff;
+        z-index: 10;
+        text-align: center;
+      }
+      #preview {
+        position: absolute;
+        bottom: 20px;
+        left: 20px;
+        width: 220px;
+        height: 165px;
+        border-radius: 14px;
+        border: 2px solid #00f2ff;
+        background: #111;
+        transform: scaleX(-1);
+        z-index: 20;
+        box-shadow: 0 0 20px rgba(0, 242, 255, 0.4);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status"></div>
+    <video id="video" style="display: none" playsinline muted></video>
+    <canvas id="preview"></canvas>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+        }
+      }
+    </script>
+
+    <script type="module">
+      import * as THREE from "three";
+
+      const COUNT = 35000;
+      let mode = "normal";
+      let handsData = [];
+      let flagData = null;
+      let textPoints = [];
+      let ballPos = new THREE.Vector3(0, 0, 0);
+
+      function generateTextPoints() {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        canvas.width = 800;
+        canvas.height = 200;
+        ctx.fillStyle = "white";
+        ctx.font = "bold 120px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText("MR. FLEXY", 400, 130);
+        const data = ctx.getImageData(0, 0, 800, 200).data;
+        for (let y = 0; y < 200; y += 2) {
+          for (let x = 0; x < 800; x += 2) {
+            if (data[(y * 800 + x) * 4 + 3] > 128) {
+              textPoints.push({ x: (x - 400) * 0.22, y: (100 - y) * 0.22 });
+            }
+          }
+        }
+      }
+      generateTextPoints();
+
+      const flagImg = new Image();
+      flagImg.crossOrigin = "anonymous";
+      flagImg.src =
+        "https://upload.wikimedia.org/wikipedia/commons/thumb/1/11/Flag_of_Sri_Lanka.svg/1024px-Flag_of_Sri_Lanka.svg.png";
+      flagImg.onload = () => {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        canvas.width = 200;
+        canvas.height = 100;
+        ctx.drawImage(flagImg, 0, 0, 200, 100);
+        flagData = ctx.getImageData(0, 0, 200, 100).data;
+      };
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000,
+      );
+      camera.position.z = 100;
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(COUNT * 3);
+      const base = new Float32Array(COUNT * 3);
+      const vel = new Float32Array(COUNT * 3);
+      const col = new Float32Array(COUNT * 3);
+
+      const mat = new THREE.PointsMaterial({
+        size: 0.22,
+        vertexColors: true,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const points = new THREE.Points(geo, mat);
+      scene.add(points);
+
+      // --- Iron Man Style Hologram Sphere ---
+      const sphereRadius = 18.5;
+      const gridGeo = new THREE.IcosahedronGeometry(sphereRadius, 3);
+      const gridMat = new THREE.LineBasicMaterial({
+        color: 0x00f2ff,
+        transparent: true,
+        opacity: 0,
+      });
+      const gridLines = new THREE.LineSegments(
+        new THREE.WireframeGeometry(gridGeo),
+        gridMat,
+      );
+
+      const nodeGeo = new THREE.SphereGeometry(0.18, 6, 6);
+      const nodeMat = new THREE.MeshBasicMaterial({
+        color: 0x00f2ff,
+        transparent: true,
+        opacity: 0,
+      });
+      const nodesGroup = new THREE.Group();
+      const vertices = gridGeo.attributes.position.array;
+      for (let i = 0; i < vertices.length; i += 3) {
+        const node = new THREE.Mesh(nodeGeo, nodeMat);
+        node.position.set(vertices[i], vertices[i + 1], vertices[i + 2]);
+        nodesGroup.add(node);
+      }
+      gridLines.add(nodesGroup);
+      scene.add(gridLines);
+
+      function setShape(m) {
+        mode = m;
+        const time = Date.now() * 0.005;
+        const isBall = m === "pass_ball";
+
+        gridMat.opacity = isBall ? 0.4 : 0;
+        nodeMat.opacity = isBall ? 0.9 : 0;
+        gridLines.rotation.y += 0.005;
+
+        for (let i = 0; i < COUNT; i++) {
+          const i3 = i * 3;
+          let x = 0,
+            y = 0,
+            z = 0,
+            r = 0,
+            g = 0.7,
+            b = 1;
+
+          if (isBall) {
+            let targetX = 0,
+              targetY = 0;
+            const fistHands = handsData.filter((h) => h.isFist);
+            if (fistHands.length > 0) {
+              targetX = fistHands[0].x;
+              targetY = fistHands[0].y;
+            }
+            ballPos.x += (targetX - ballPos.x) * 0.1;
+            ballPos.y += (targetY - ballPos.y) * 0.1;
+            gridLines.position.copy(ballPos);
+
+            x = 0;
+            y = 0;
+            z = 500;
+            r = 0;
+            g = 0;
+            b = 0;
+          } else if (m === "text") {
+            const pt = textPoints[i % textPoints.length];
+            x = pt.x;
+            y = pt.y;
+            z = Math.sin(i * 0.5 + time) * 1.5;
+            r = 1;
+            g = 0.4;
+            b = 0;
+          } else if (m === "flag") {
+            const colIdx = i % 200;
+            const rowIdx = Math.floor(i / 200) % 100;
+            x = (colIdx - 100) * 0.5;
+            y = (50 - rowIdx) * 0.5;
+            z = Math.sin(colIdx * 0.2 + time) * 2.5;
+            if (flagData) {
+              const pIdx = (rowIdx * 200 + colIdx) * 4;
+              r = flagData[pIdx] / 255;
+              g = flagData[pIdx + 1] / 255;
+              b = flagData[pIdx + 2] / 255;
+            }
+          } else if (m === "heart") {
+            const t = (i / COUNT) * Math.PI * 2;
+            const beat = 2.3 + Math.sin(Date.now() * 0.01) * 0.15;
+            x = 16 * Math.pow(Math.sin(t), 3) * beat;
+            y =
+              (13 * Math.cos(t) -
+                5 * Math.cos(2 * t) -
+                2 * Math.cos(3 * t) -
+                Math.cos(4 * t)) *
+              beat;
+            z = (Math.random() - 0.5) * 4;
+            r = 1;
+            g = 0.1;
+            b = 0.3;
+          } else if (m === "iloveu") {
+            const p = i / COUNT;
+            if (p < 0.2) {
+              x = -45;
+              y = (Math.random() - 0.5) * 45;
+            } else if (p < 0.6) {
+              const t = (i / (COUNT * 0.4)) * Math.PI * 2;
+              x = 16 * Math.pow(Math.sin(t), 3) * 1.1;
+              y =
+                (13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t)) *
+                1.1;
+            } else {
+              const uT = (p - 0.6) / 0.4;
+              if (uT < 0.3) {
+                x = 30;
+                y = (uT / 0.3) * 35 - 10;
+              } else if (uT < 0.7) {
+                const angle = ((uT - 0.3) / 0.4) * Math.PI;
+                x = 37.5 - Math.cos(angle) * 7.5;
+                y = -Math.sin(angle) * 12 - 10;
+              } else {
+                x = 45;
+                y = ((uT - 0.7) / 0.3) * 35 - 10;
+              }
+            }
+            r = 1;
+            g = 0.05;
+            b = 0.4;
+          } else {
+            x = (Math.random() - 0.5) * 170;
+            y = (Math.random() - 0.5) * 170;
+            z = (Math.random() - 0.5) * 170;
+            r = 0;
+            g = 0.7;
+            b = 1;
+          }
+          base[i3] = x;
+          base[i3 + 1] = y;
+          base[i3 + 2] = z;
+          col[i3] = r;
+          col[i3 + 1] = g;
+          col[i3 + 2] = b;
+        }
+      }
+
+      async function startApp() {
+        const video = document.getElementById("video");
+        const hands = new window.Hands({
+          locateFile: (f) =>
+            `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}`,
+        });
+        hands.setOptions({
+          maxNumHands: 2,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.6,
+          minTrackingConfidence: 0.6,
+        });
+        hands.onResults((r) => {
+          const canvas = document.getElementById("preview");
+          const ctx = canvas.getContext("2d");
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(r.image, 0, 0, canvas.width, canvas.height);
+          handsData = [];
+          if (r.multiHandLandmarks) {
+            for (const lm of r.multiHandLandmarks) {
+              const x = -(lm[9].x - 0.5) * 160;
+              const y = -(lm[9].y - 0.5) * 120;
+              const indexUp = lm[8].y < lm[6].y;
+              const middleUp = lm[12].y < lm[10].y;
+              const pinkyUp = lm[20].y < lm[18].y;
+              const thumbUp = lm[4].y < lm[3].y;
+              const isFist = !indexUp && !middleUp && !pinkyUp;
+              handsData.push({
+                x,
+                y,
+                isFist,
+                thumbUp,
+                indexUp,
+                middleUp,
+                pinkyUp,
+              });
+            }
+          }
+          if (handsData.some((h) => h.isFist)) setShape("pass_ball");
+          else if (handsData.length >= 1) {
+            const h = handsData[0];
+            if (h.pinkyUp && !h.indexUp && !h.middleUp) setShape("text");
+            else if (h.indexUp && h.middleUp && !h.pinkyUp) setShape("flag");
+            else if (h.indexUp && h.pinkyUp && h.thumbUp && !h.middleUp)
+              setShape("iloveu");
+            else if (h.indexUp && !h.middleUp && !h.pinkyUp) setShape("heart");
+            else setShape("normal");
+          } else setShape("normal");
+        });
+        const cam = new window.Camera(video, {
+          onFrame: async () => {
+            await hands.send({ image: video });
+          },
+          width: 640,
+          height: 480,
+        });
+        cam.start();
+      }
+
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute("color", new THREE.BufferAttribute(col, 3));
+      setShape("normal");
+      startApp();
+
+      function animate() {
+        requestAnimationFrame(animate);
+        const p = geo.attributes.position.array;
+        const c = geo.attributes.color.array;
+        if (mode !== "normal") setShape(mode);
+        for (let i = 0; i < COUNT; i++) {
+          const i3 = i * 3;
+          vel[i3] += (base[i3] - p[i3]) * 0.08;
+          vel[i3 + 1] += (base[i3 + 1] - p[i3 + 1]) * 0.08;
+          vel[i3 + 2] += (base[i3 + 2] - p[i3 + 2]) * 0.08;
+          p[i3] += vel[i3];
+          p[i3 + 1] += vel[i3 + 1];
+          p[i3 + 2] += vel[i3 + 2];
+          vel[i3] *= 0.82;
+          vel[i3 + 1] *= 0.82;
+          vel[i3 + 2] *= 0.82;
+          c[i3] += (col[i3] - c[i3]) * 0.12;
+          c[i3 + 1] += (col[i3 + 1] - c[i3 + 1]) * 0.12;
+          c[i3 + 2] += (col[i3 + 2] - c[i3 + 2]) * 0.12;
+        }
+        geo.attributes.position.needsUpdate = true;
+        geo.attributes.color.needsUpdate = true;
+        renderer.render(scene, camera);
+      }
+      animate();
+    </script>
+  </body>
+</html>
